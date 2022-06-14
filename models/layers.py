@@ -548,10 +548,12 @@ class NIN(nn.Module):
     super().__init__()
     self.W = nn.Parameter(default_init(scale=init_scale)((in_dim, num_units)), requires_grad=True)
     self.b = nn.Parameter(torch.zeros(num_units), requires_grad=True)
-
+	
   def forward(self, x):
+		# change the shape to (batch, width, height, channel)
     x = x.permute(0, 2, 3, 1)
     y = contract_inner(x, self.W) + self.b
+		# change the shape to (batch, channel, width, height)
     return y.permute(0, 3, 1, 2)
 
 

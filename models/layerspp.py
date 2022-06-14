@@ -189,7 +189,18 @@ class ResnetBlockDDPMpp(nn.Module):
     self.act = act
     self.out_ch = out_ch
     self.conv_shortcut = conv_shortcut
-
+  '''
+            x         temb
+      |---------|   |-------|
+      |   conv  |   | linear|
+      |---------|   |-------|
+            |            |
+            ---  +   -----
+                 |
+            |----------|            
+            |   conv   |
+            |----------|
+  '''
   def forward(self, x, temb=None):
     h = self.act(self.GroupNorm_0(x))
     h = self.Conv_0(h)

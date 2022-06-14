@@ -5,7 +5,16 @@ tensorflow_datasets==3.1.0
 tensorflow==2.4.0
 tensorflow-addons==0.12.0
 tensorboard==2.4.0
+tensorflow-probability==0.12
 absl-py==0.10.0
 torch>=1.7.0
 torchvision
 ninja
+scipy
+numpy
+matplotlib
+seaborn
+pandas
+celluloid
+prdc
+jaxlib

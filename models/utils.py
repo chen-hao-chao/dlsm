@@ -93,6 +93,14 @@ def create_model(config):
   score_model = torch.nn.DataParallel(score_model)
   return score_model
 
+### ($) create classifier
+def create_classifier(config):
+  """Create the classifier."""
+  model_name = config.classifier.name
+  classifier = get_model(model_name)(config)
+  classifier = classifier.to(config.device)
+  classifier = torch.nn.DataParallel(classifier)
+  return classifier
 
 def get_model_fn(model, train=False):
   """Create a function to give the output of the score-based model.
@@ -116,15 +124,33 @@ def get_model_fn(model, train=False):
     Returns:
       A tuple of (model output, new mutable states)
     """
+    # [Tag] 4. Model-Wrapper
     if not train:
       model.eval()
+      # [Goto] 5. Model
       return model(x, labels)
     else:
       model.train()
+      # [Goto] 5. Model
       return model(x, labels)
 
   return model_fn
 
+def get_classifier_fn(sde, model, train=False, continuous=False):
+  model_fn = get_model_fn(model, train=train)
+  if isinstance(sde, sde_lib.VPSDE) or isinstance(sde, sde_lib.subVPSDE):
+    def classify_fn(x, t):
+      if continuous or isinstance(sde, sde_lib.subVPSDE):
+        y = model_fn(x, t * 999)
+        return y
+      else:
+        raise NotImplementedError(f"SDE class not yet supported for the classifier.")
+  
+  elif isinstance(sde, sde_lib.VESDE):
+    def classify_fn(x, t):
+      y = model_fn(x, sde.marginal_prob(torch.zeros_like(x), t)[1])
+      return y
+  return classify_fn
 
 def get_score_fn(sde, model, train=False, continuous=False):
   """Wraps `score_fn` so that the model output corresponds to a real time-dependent score function.
@@ -147,15 +173,24 @@ def get_score_fn(sde, model, train=False, continuous=False):
         # For VP-trained models, t=0 corresponds to the lowest noise level
         # The maximum value of time embedding is assumed to 999 for
         # continuously-trained models.
+
+        # [Tag] 3.Score Function (Todo)
         labels = t * 999
+        # [Goto] Model-Wrapper
         score = model_fn(x, labels)
+        # [Goto] Perturbation Kernel
         std = sde.marginal_prob(torch.zeros_like(x), t)[1]
+        # t        : [1, 1e-3]
+        # labels   : [999, 0.999]
+        # score_in : ?? (output of model)
+        # std      : N(std, mean).std
       else:
         # For VP-trained models, t=0 corresponds to the lowest noise level
         labels = t * (sde.N - 1)
         score = model_fn(x, labels)
         std = sde.sqrt_1m_alphas_cumprod.to(labels.device)[labels.long()]
 
+      # score_out: Todo
       score = -score / std[:, None, None, None]
       return score
 
@@ -176,6 +211,7 @@ def get_score_fn(sde, model, train=False, continuous=False):
     raise NotImplementedError(f"SDE class {sde.__class__.__name__} not yet supported.")
 
   return score_fn
+
 
 
 def to_flattened_numpy(x):

@@ -19,6 +19,7 @@
 import functools
 
 import torch
+import torch.nn as nn
 import numpy as np
 import abc
 
@@ -26,6 +27,7 @@ from models.utils import from_flattened_numpy, to_flattened_numpy, get_score_fn
 from scipy import integrate
 import sde_lib
 from models import utils as mutils
+import torch.nn.functional as F
 
 _CORRECTORS = {}
 _PREDICTORS = {}
@@ -116,7 +118,10 @@ def get_sampling_fn(config, sde, shape, inverse_scaler, eps):
                                  continuous=config.training.continuous,
                                  denoise=config.sampling.noise_removal,
                                  eps=eps,
-                                 device=config.device)
+                                 device=config.device,
+                                 conditional=config.sampling.conditional,
+                                 adaptive=(config.sampling.predictor == 'adaptive'),
+                                 scaling_factor=config.sampling.scaling_factor)
   else:
     raise ValueError(f"Sampler name {sampler_name} unknown.")
 
@@ -126,12 +131,13 @@ def get_sampling_fn(config, sde, shape, inverse_scaler, eps):
 class Predictor(abc.ABC):
   """The abstract class for a predictor algorithm."""
 
-  def __init__(self, sde, score_fn, probability_flow=False):
+  def __init__(self, sde, score_fn, classifier_fn=None, probability_flow=False, conditional=False, cond=None, scaling_factor=1):
     super().__init__()
     self.sde = sde
     # Compute the reverse SDE/ODE
-    self.rsde = sde.reverse(score_fn, probability_flow)
+    self.rsde = sde.reverse(score_fn=score_fn, classifier_fn=classifier_fn, probability_flow=probability_flow, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
     self.score_fn = score_fn
+    self.classifier_fn = classifier_fn
 
   @abc.abstractmethod
   def update_fn(self, x, t):
@@ -151,12 +157,16 @@ class Predictor(abc.ABC):
 class Corrector(abc.ABC):
   """The abstract class for a corrector algorithm."""
 
-  def __init__(self, sde, score_fn, snr, n_steps):
+  def __init__(self, sde, score_fn, snr, n_steps, classifier_fn=None, conditional=False, cond=None, scaling_factor=1):
     super().__init__()
     self.sde = sde
     self.score_fn = score_fn
+    self.classifier_fn = classifier_fn
     self.snr = snr
     self.n_steps = n_steps
+    self.cond = cond
+    self.scaling_factor = scaling_factor
+    self.conditional = conditional
 
   @abc.abstractmethod
   def update_fn(self, x, t):
@@ -175,8 +185,9 @@ class Corrector(abc.ABC):
 
 @register_predictor(name='euler_maruyama')
 class EulerMaruyamaPredictor(Predictor):
-  def __init__(self, sde, score_fn, probability_flow=False):
-    super().__init__(sde, score_fn, probability_flow)
+  def __init__(self, sde, score_fn, classifier_fn=None, probability_flow=False, conditional=False, cond=None, scaling_factor=1):
+    super().__init__(sde, score_fn, classifier_fn, probability_flow, conditional, cond, scaling_factor)
+    self.rsde = sde.reverse(score_fn=score_fn, classifier_fn=classifier_fn, probability_flow=probability_flow, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
 
   def update_fn(self, x, t):
     dt = -1. / self.rsde.N
@@ -189,8 +200,9 @@ class EulerMaruyamaPredictor(Predictor):
 
 @register_predictor(name='reverse_diffusion')
 class ReverseDiffusionPredictor(Predictor):
-  def __init__(self, sde, score_fn, probability_flow=False):
-    super().__init__(sde, score_fn, probability_flow)
+  def __init__(self, sde, score_fn, classifier_fn=None, probability_flow=False, conditional=False, cond=None, scaling_factor=1):
+    super().__init__(sde, score_fn, classifier_fn, probability_flow, conditional, cond, scaling_factor)
+    self.rsde = sde.reverse(score_fn=score_fn, classifier_fn=classifier_fn, probability_flow=probability_flow, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
 
   def update_fn(self, x, t):
     f, G = self.rsde.discretize(x, t)
@@ -204,11 +216,12 @@ class ReverseDiffusionPredictor(Predictor):
 class AncestralSamplingPredictor(Predictor):
   """The ancestral sampling predictor. Currently only supports VE/VP SDEs."""
 
-  def __init__(self, sde, score_fn, probability_flow=False):
-    super().__init__(sde, score_fn, probability_flow)
+  def __init__(self, sde, score_fn, classifier_fn=None, probability_flow=False, conditional=False, cond=None, scaling_factor=1):
+    super().__init__(sde, score_fn, classifier_fn, probability_flow, conditional, cond)
     if not isinstance(sde, sde_lib.VPSDE) and not isinstance(sde, sde_lib.VESDE):
       raise NotImplementedError(f"SDE class {sde.__class__.__name__} not yet supported.")
     assert not probability_flow, "Probability flow not supported by ancestral sampling"
+    self.rsde = sde.reverse(score_fn=score_fn, classifier_fn=classifier_fn, probability_flow=probability_flow, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
 
   def vesde_update_fn(self, x, t):
     sde = self.sde
@@ -243,22 +256,104 @@ class AncestralSamplingPredictor(Predictor):
 class NonePredictor(Predictor):
   """An empty predictor that does nothing."""
 
-  def __init__(self, sde, score_fn, probability_flow=False):
+  def __init__(self, sde, score_fn, classifier_fn=None, probability_flow=False, conditional=False, cond=None, scaling_factor=1):
     pass
 
   def update_fn(self, x, t):
     return x, x
+  
 
+# EM or Improved-Euler (Heun's method) with adaptive step-sizes
+@register_predictor(name='adaptive')
+class AdaptivePredictor(Predictor):
+  def __init__(self, sde, score_fn, classifier_fn=None, probability_flow=False, conditional=False, cond=None, 
+    eps=1e-5, abstol = 0.0078, reltol = 1e-2, error_use_prev=True, norm = "L2_scaled",
+    safety = .9, sde_improved_euler=True, extrapolation = True, exp=0.9, variance=1, scaling_factor=1):
+    super().__init__( sde, score_fn, classifier_fn, probability_flow, conditional, cond, scaling_factor)
+    self.h_min = 1e-10 # min step-size
+    self.t = sde.T # starting t
+    self.eps = eps # end t
+    self.abstol = abstol
+    self.reltol = reltol
+    self.error_use_prev = error_use_prev
+    self.norm = norm
+    self.safety = safety
+    self.sde_improved_euler = sde_improved_euler
+    self.extrapolation = extrapolation
+    self.exp = exp
+    self.variance = variance
+    self.rsde = sde.reverse(score_fn=score_fn, classifier_fn=classifier_fn, probability_flow=probability_flow, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
+    
+    if self.norm == "L2_scaled":
+      def norm_fn(x):
+        n = x.shape[1]*x.shape[2]*x.shape[3]
+        return torch.sqrt(torch.sum((x)**2, dim=(1,2,3), keepdims=True)/n)
+    elif self.norm == "L2":
+      def norm_fn(x):
+        return torch.sqrt(torch.sum((x)**2, dim=(1,2,3), keepdims=True))
+    elif self.norm == "Linf":
+      def norm_fn(x):
+        return torch.max(torch.abs(x), dim=(1,2,3), keepdims=True)
+    else:
+      raise NotImplementedError(self.norm)
+    self.norm_fn = norm_fn
+
+
+  def update_fn(self, x, x_prev, t, h): 
+    # Note: both h and t are vectors with batch_size elems (this is because we want adaptive step-sizes for each sample separately)
+    # drift: [batch_size, channels, img_size, img_size]
+    # diffusion: [batch_size]
+    h_ = h[:, None, None, None] # [batch_size, 1, 1, 1]
+    t_ = t[:, None, None, None] # expand for multiplications
+
+    z = torch.randn_like(x)*self.variance
+    drift, diffusion = self.rsde.sde(x, t)
+
+    # Heun's method for SDE (while Lamba method only focuses on the non-stochastic part, this also includes the stochastic part)
+    K1 = -(h_ * drift) + (diffusion[:, None, None, None] * torch.sqrt(h_) * z) 
+    drift_Heun, diffusion_Heun = self.rsde.sde(x + K1, t - h)
+    K2 = -(h_ * drift_Heun) + (diffusion_Heun[:, None, None, None] * torch.sqrt(h_) * z)
+    E = (K2 - K1) / 2 # local-error between EM and Heun (SDEs) (right one)
+
+    if self.extrapolation: # Extrapolate using the Heun's method result
+      x_new = x + (K1 + K2) / 2
+      x_check = x + K1 # x_prime in the algorithm
+    else:
+      x_new = x + K1
+      x_check = x + (K1 + K2) / 2
+
+    # Calculating the error-control
+    if self.error_use_prev:
+      reltol_ctl = torch.maximum(torch.abs(x_prev), torch.abs(x_check)) * self.reltol
+    else:
+      reltol_ctl = torch.abs(x_check) * self.reltol
+    err_ctl = torch.maximum(reltol_ctl, torch.ones(reltol_ctl.shape).to(reltol_ctl.device)*self.abstol) # [batch_size, channels, img_size, img_size]
+
+    # Normalizing for each sample separately
+    E_scaled_norm = self.norm_fn( E/err_ctl ) # [batch_size, 1, 1, 1]
+
+    # Accept or reject x_{n+1} and t_{n+1} for each sample separately
+    accept = torch.le(E_scaled_norm, 1) # T/F tensor
+    x = torch.where(accept, x_new, x)
+    x_prev = torch.where(accept, x_check, x_prev)
+    t_ = torch.where(accept, t_ - h_, t_)
+
+    # Change the step-size
+    h_max = torch.maximum(t_ - self.eps, torch.zeros(t_.shape).to(t_.device)) # max step-size must be the distance to the end (we use maximum between that and zero in case of a tiny but negative value: -1e-10)
+    E_pow = torch.where(h_ == 0, h_, torch.pow(E_scaled_norm, -self.exp)) # (E^-r) Only applies power when not zero, otherwise, we get nans
+    h_new = torch.minimum(h_max, self.safety*h_*E_pow)
+
+    return x, x_prev, t_.reshape((-1)), h_new.reshape((-1))
 
 @register_corrector(name='langevin')
 class LangevinCorrector(Corrector):
-  def __init__(self, sde, score_fn, snr, n_steps):
-    super().__init__(sde, score_fn, snr, n_steps)
+  def __init__(self, sde, score_fn, snr, n_steps, classifier_fn=None, conditional=False, cond=None, scaling_factor=1):
+    super().__init__(sde, score_fn, snr, n_steps, classifier_fn, conditional, cond, scaling_factor)
     if not isinstance(sde, sde_lib.VPSDE) \
         and not isinstance(sde, sde_lib.VESDE) \
         and not isinstance(sde, sde_lib.subVPSDE):
       raise NotImplementedError(f"SDE class {sde.__class__.__name__} not yet supported.")
-
+    
   def update_fn(self, x, t):
     sde = self.sde
     score_fn = self.score_fn
@@ -271,12 +366,22 @@ class LangevinCorrector(Corrector):
       alpha = torch.ones_like(t)
 
     for i in range(n_steps):
-      grad = score_fn(x, t)
+      score = score_fn(x, t)
+      if self.conditional:
+        with torch.enable_grad():
+          x = x.clone().detach().requires_grad_(True)
+          labels = torch.ones(x.shape[0], device=x.device, dtype=torch.long) * self.cond
+          sm = nn.Softmax(dim=1)
+          log_prob_class = torch.log(sm(self.classifier_fn(x, t))+ 1e-8)
+          label_mask = F.one_hot(labels, num_classes=log_prob_class.shape[1])
+          grads_prob_class, = torch.autograd.grad(log_prob_class, x, grad_outputs=label_mask)
+        score = score + grads_prob_class*self.scaling_factor
+
       noise = torch.randn_like(x)
-      grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
+      grad_norm = torch.norm(score.reshape(score.shape[0], -1), dim=-1).mean()
       noise_norm = torch.norm(noise.reshape(noise.shape[0], -1), dim=-1).mean()
       step_size = (target_snr * noise_norm / grad_norm) ** 2 * 2 * alpha
-      x_mean = x + step_size[:, None, None, None] * grad
+      x_mean = x + step_size[:, None, None, None] * score
       x = x_mean + torch.sqrt(step_size * 2)[:, None, None, None] * noise
 
     return x, x_mean
@@ -289,8 +394,8 @@ class AnnealedLangevinDynamics(Corrector):
   We include this corrector only for completeness. It was not directly used in our paper.
   """
 
-  def __init__(self, sde, score_fn, snr, n_steps):
-    super().__init__(sde, score_fn, snr, n_steps)
+  def __init__(self, sde, score_fn, snr, n_steps, classifier_fn=None, conditional=False, cond=None, scaling_factor=1):
+    super().__init__(sde, score_fn, snr, n_steps, classifier_fn, conditional, cond, scaling_factor)
     if not isinstance(sde, sde_lib.VPSDE) \
         and not isinstance(sde, sde_lib.VESDE) \
         and not isinstance(sde, sde_lib.subVPSDE):
@@ -323,38 +428,45 @@ class AnnealedLangevinDynamics(Corrector):
 class NoneCorrector(Corrector):
   """An empty corrector that does nothing."""
 
-  def __init__(self, sde, score_fn, snr, n_steps):
+  def __init__(self, sde, score_fn, snr, n_steps, classifier_fn=None, conditional=False, cond=None, scaling_factor=1):
     pass
 
   def update_fn(self, x, t):
     return x, x
 
 
-def shared_predictor_update_fn(x, t, sde, model, predictor, probability_flow, continuous):
+def shared_predictor_update_fn(x, t, sde, score_fn, classifier_fn, predictor, probability_flow, 
+                                conditional, cond, h=None, x_prev=None, scaling_factor=1):
   """A wrapper that configures and returns the update function of predictors."""
-  score_fn = mutils.get_score_fn(sde, model, train=False, continuous=continuous)
   if predictor is None:
-    # Corrector-only sampler
-    predictor_obj = NonePredictor(sde, score_fn, probability_flow)
+    predictor_obj = NonePredictor(sde=sde, score_fn=score_fn, classifier_fn=classifier_fn,
+                                    probability_flow=probability_flow, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
   else:
-    predictor_obj = predictor(sde, score_fn, probability_flow)
-  return predictor_obj.update_fn(x, t)
+    predictor_obj = predictor(sde=sde, score_fn=score_fn, classifier_fn=classifier_fn,
+                                    probability_flow=probability_flow, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
+  if h is not None:
+    return predictor_obj.update_fn(x, x_prev, t, h)
+  else:
+    return predictor_obj.update_fn(x, t)
+  
 
 
-def shared_corrector_update_fn(x, t, sde, model, corrector, continuous, snr, n_steps):
+def shared_corrector_update_fn(x, t, sde, score_fn, classifier_fn, corrector,
+                                conditional, cond, snr, n_steps, scaling_factor=1):
   """A wrapper tha configures and returns the update function of correctors."""
-  score_fn = mutils.get_score_fn(sde, model, train=False, continuous=continuous)
   if corrector is None:
     # Predictor-only sampler
-    corrector_obj = NoneCorrector(sde, score_fn, snr, n_steps)
+    corrector_obj = NoneCorrector(sde=sde, score_fn=score_fn, snr=snr, n_steps=n_steps,
+                                classifier_fn=classifier_fn, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
   else:
-    corrector_obj = corrector(sde, score_fn, snr, n_steps)
+    corrector_obj = corrector(sde=sde, score_fn=score_fn, snr=snr, n_steps=n_steps, classifier_fn=classifier_fn, conditional=conditional, cond=cond, scaling_factor=scaling_factor)
   return corrector_obj.update_fn(x, t)
 
 
 def get_pc_sampler(sde, shape, predictor, corrector, inverse_scaler, snr,
                    n_steps=1, probability_flow=False, continuous=False,
-                   denoise=True, eps=1e-3, device='cuda'):
+                   denoise=True, eps=1e-5, h_init=5e-1, device='cuda',
+                   conditional=False, adaptive=False, scaling_factor=1):
   """Create a Predictor-Corrector (PC) sampler.
 
   Args:
@@ -379,36 +491,59 @@ def get_pc_sampler(sde, shape, predictor, corrector, inverse_scaler, snr,
                                           sde=sde,
                                           predictor=predictor,
                                           probability_flow=probability_flow,
-                                          continuous=continuous)
+                                          conditional=conditional,
+                                          scaling_factor=scaling_factor)
   corrector_update_fn = functools.partial(shared_corrector_update_fn,
                                           sde=sde,
                                           corrector=corrector,
-                                          continuous=continuous,
                                           snr=snr,
-                                          n_steps=n_steps)
+                                          n_steps=n_steps,
+                                          conditional=conditional,
+                                          scaling_factor=scaling_factor)
 
-  def pc_sampler(model):
+  def pc_sampler(score_model, classifier_model=None, cond=None):
     """ The PC sampler funciton.
 
     Args:
-      model: A score model.
+      score_fn: A score model.
     Returns:
       Samples, number of function evaluations.
     """
     with torch.no_grad():
-      # Initial sample
-      x = sde.prior_sampling(shape).to(device)
-      timesteps = torch.linspace(sde.T, eps, sde.N, device=device)
+      
+      score_fn = mutils.get_score_fn(sde, score_model, train=False, continuous=continuous)
+      if classifier_model is not None:
+        classifier_fn = mutils.get_classifier_fn(sde, classifier_model, train=False, continuous=continuous)
+      else:
+        classifier_fn = None
 
-      for i in range(sde.N):
-        t = timesteps[i]
-        vec_t = torch.ones(shape[0], device=t.device) * t
-        x, x_mean = corrector_update_fn(x, vec_t, model=model)
-        x, x_mean = predictor_update_fn(x, vec_t, model=model)
+      if adaptive:
+        # Initial sample
+        x = sde.prior_sampling(shape).to(device)
+        h = torch.ones(shape[0]).to(device) * h_init # initial step_size
+        t = torch.ones(shape[0]).to(device) * sde.T # initial time
+        n_iter = 0
 
-      return inverse_scaler(x_mean if denoise else x), sde.N * (n_steps + 1)
+        while((torch.abs(t - eps) > 1e-6).any()):
+          x, x_prev = corrector_update_fn(x=x, t=t, score_fn=score_fn, classifier_fn=classifier_fn, cond=cond)
+          x, x_prev, t, h = predictor_update_fn(x=x, t=t, h=h, x_prev=x_prev, score_fn=score_fn, classifier_fn=classifier_fn, cond=cond)
+          n_iter += 1
 
+        return inverse_scaler(x), n_iter
+
+      else:
+        x = sde.prior_sampling(shape).to(device)
+        timesteps = torch.linspace(sde.T, eps, sde.N, device=device)
+        for i in range(sde.N):
+          t = timesteps[i]
+          vec_t = torch.ones(shape[0], device=t.device) * t
+          x, x_mean = corrector_update_fn(x=x, t=vec_t, score_fn=score_fn, classifier_fn=classifier_fn, cond=cond)
+          x, x_mean = predictor_update_fn(x=x, t=vec_t, score_fn=score_fn, classifier_fn=classifier_fn, cond=cond)
+          
+        return inverse_scaler(x_mean if denoise else x), sde.N * (n_steps + 1)
+  
   return pc_sampler
+
 
 
 def get_ode_sampler(sde, shape, inverse_scaler,

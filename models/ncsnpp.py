@@ -37,9 +37,13 @@ class NCSNpp(nn.Module):
 
   def __init__(self, config):
     super().__init__()
+
     self.config = config
     self.act = act = get_act(config)
     self.register_buffer('sigmas', torch.tensor(utils.get_sigmas(config)))
+
+    ### ($) 1 channel -> 3 channel conv
+    #self.num_in_channels = config.data.num_channels
 
     self.nf = nf = config.model.nf
     ch_mult = config.model.ch_mult
@@ -66,14 +70,9 @@ class NCSNpp(nn.Module):
     combiner = functools.partial(Combine, method=combine_method)
 
     modules = []
-    # timestep/noise_level embedding; only for continuous training
     if embedding_type == 'fourier':
-      # Gaussian Fourier features embeddings.
       assert config.training.continuous, "Fourier features are only used for continuous training."
-
-      modules.append(layerspp.GaussianFourierProjection(
-        embedding_size=nf, scale=config.model.fourier_scale
-      ))
+      modules.append(layerspp.GaussianFourierProjection(embedding_size=nf, scale=config.model.fourier_scale))
       embed_dim = 2 * nf
 
     elif embedding_type == 'positional':
@@ -81,7 +80,10 @@ class NCSNpp(nn.Module):
 
     else:
       raise ValueError(f'embedding type {embedding_type} unknown.')
-
+    # whether the model is conditioned by t or not
+		# initialize the weight and bias of the the following layer:
+		# Linear: embed_dim -> nf * 4
+		# Linear: nf * 4 -> nf * 4
     if conditional:
       modules.append(nn.Linear(embed_dim, nf * 4))
       modules[-1].weight.data = default_initializer()(modules[-1].weight.shape)
@@ -89,20 +91,20 @@ class NCSNpp(nn.Module):
       modules.append(nn.Linear(nf * 4, nf * 4))
       modules[-1].weight.data = default_initializer()(modules[-1].weight.shape)
       nn.init.zeros_(modules[-1].bias)
-
+		# define attention block
     AttnBlock = functools.partial(layerspp.AttnBlockpp,
                                   init_scale=init_scale,
                                   skip_rescale=skip_rescale)
-
+		# define upsmapling function with fir/conv filter
     Upsample = functools.partial(layerspp.Upsample,
                                  with_conv=resamp_with_conv, fir=fir, fir_kernel=fir_kernel)
-
+		
     if progressive == 'output_skip':
       self.pyramid_upsample = layerspp.Upsample(fir=fir, fir_kernel=fir_kernel, with_conv=False)
     elif progressive == 'residual':
       pyramid_upsample = functools.partial(layerspp.Upsample,
                                            fir=fir, fir_kernel=fir_kernel, with_conv=True)
-
+		# define downsampling function with fir/conv filter
     Downsample = functools.partial(layerspp.Downsample,
                                    with_conv=resamp_with_conv, fir=fir, fir_kernel=fir_kernel)
 
@@ -111,7 +113,7 @@ class NCSNpp(nn.Module):
     elif progressive_input == 'residual':
       pyramid_downsample = functools.partial(layerspp.Downsample,
                                              fir=fir, fir_kernel=fir_kernel, with_conv=True)
-
+		# residual blocks
     if resblock_type == 'ddpm':
       ResnetBlock = functools.partial(ResnetBlockDDPM,
                                       act=act,
@@ -134,15 +136,15 @@ class NCSNpp(nn.Module):
       raise ValueError(f'resblock type {resblock_type} unrecognized.')
 
     # Downsampling block
-
     channels = config.data.num_channels
     if progressive_input != 'none':
       input_pyramid_ch = channels
-
+		# Add an 3 * 3 convolution to the network
     modules.append(conv3x3(channels, nf))
     hs_c = [nf]
 
     in_ch = nf
+		# Create a symmetric resent architecture (AE like)
     for i_level in range(num_resolutions):
       # Residual blocks for this resolution
       for i_block in range(num_res_blocks):
@@ -230,12 +232,16 @@ class NCSNpp(nn.Module):
     self.all_modules = nn.ModuleList(modules)
 
   def forward(self, x, time_cond):
+    # [Tag] 5. Model (Todo)
     # timestep/noise_level embedding; only for continuous training
     modules = self.all_modules
+		# module index
     m_idx = 0
     if self.embedding_type == 'fourier':
+      # Note: Won't enter
       # Gaussian Fourier features embeddings.
       used_sigmas = time_cond
+			# fourier projection layer
       temb = modules[m_idx](torch.log(used_sigmas))
       m_idx += 1
 
@@ -249,6 +255,7 @@ class NCSNpp(nn.Module):
       raise ValueError(f'embedding type {self.embedding_type} unknown.')
 
     if self.conditional:
+			# Feed the time embedding through the linear layers
       temb = modules[m_idx](temb)
       m_idx += 1
       temb = modules[m_idx](self.act(temb))
@@ -264,7 +271,7 @@ class NCSNpp(nn.Module):
     input_pyramid = None
     if self.progressive_input != 'none':
       input_pyramid = x
-
+		# feed x into the conv3x3 and obtain hs (hidden state(?))
     hs = [modules[m_idx](x)]
     m_idx += 1
     for i_level in range(self.num_resolutions):
@@ -272,12 +279,13 @@ class NCSNpp(nn.Module):
       for i_block in range(self.num_res_blocks):
         h = modules[m_idx](hs[-1], temb)
         m_idx += 1
+				# apply attention
         if h.shape[-1] in self.attn_resolutions:
           h = modules[m_idx](h)
           m_idx += 1
 
         hs.append(h)
-
+			# apply downsampling or residual layer
       if i_level != self.num_resolutions - 1:
         if self.resblock_type == 'ddpm':
           h = modules[m_idx](hs[-1])
@@ -301,7 +309,7 @@ class NCSNpp(nn.Module):
           h = input_pyramid
 
         hs.append(h)
-
+		# apply residual -> attention -> residual blocks
     h = hs[-1]
     h = modules[m_idx](h, temb)
     m_idx += 1
@@ -315,6 +323,7 @@ class NCSNpp(nn.Module):
     # Upsampling block
     for i_level in reversed(range(self.num_resolutions)):
       for i_block in range(self.num_res_blocks + 1):
+				# u-net skip layer
         h = modules[m_idx](torch.cat([h, hs.pop()], dim=1), temb)
         m_idx += 1
 
@@ -375,6 +384,7 @@ class NCSNpp(nn.Module):
 
     assert m_idx == len(modules)
     if self.config.model.scale_by_sigma:
+      # Note: Won't enter (for mnist_ddpmpp)
       used_sigmas = used_sigmas.reshape((x.shape[0], *([1] * len(x.shape[1:]))))
       h = h / used_sigmas
 

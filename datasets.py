@@ -18,7 +18,7 @@
 import jax
 import tensorflow as tf
 import tensorflow_datasets as tfds
-
+import samples.samples
 
 def get_data_scaler(config):
   """Data normalizer. Assume data are always in [0, 1]."""
@@ -99,9 +99,9 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
     def resize_op(img):
       img = tf.image.convert_image_dtype(img, tf.float32)
       return tf.image.resize(img, [config.data.image_size, config.data.image_size], antialias=True)
-
-  elif config.data.dataset == 'SVHN':
-    dataset_builder = tfds.builder('svhn_cropped')
+  
+  elif config.data.dataset == 'CIFAR100':
+    dataset_builder = tfds.builder('cifar100')
     train_split_name = 'train'
     eval_split_name = 'test'
 
@@ -109,69 +109,28 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
       img = tf.image.convert_image_dtype(img, tf.float32)
       return tf.image.resize(img, [config.data.image_size, config.data.image_size], antialias=True)
 
-  elif config.data.dataset == 'CELEBA':
-    dataset_builder = tfds.builder('celeb_a')
+  elif config.data.dataset in ['samples_ours_cifar10', 'samples_base_cifar10', 'samples_scale_cifar10', 'samples_ours_cifar100', 'samples_base_cifar100', 'samples_scale_cifar100']:
+    dataset_builder = tfds.builder(config.data.dataset)
     train_split_name = 'train'
-    eval_split_name = 'validation'
-
+    eval_split_name = 'test'
     def resize_op(img):
       img = tf.image.convert_image_dtype(img, tf.float32)
-      img = central_crop(img, 140)
-      img = resize_small(img, config.data.image_size)
-      return img
-
-  elif config.data.dataset == 'LSUN':
-    dataset_builder = tfds.builder(f'lsun/{config.data.category}')
-    train_split_name = 'train'
-    eval_split_name = 'validation'
-
-    if config.data.image_size == 128:
-      def resize_op(img):
-        img = tf.image.convert_image_dtype(img, tf.float32)
-        img = resize_small(img, config.data.image_size)
-        img = central_crop(img, config.data.image_size)
-        return img
-
-    else:
-      def resize_op(img):
-        img = crop_resize(img, config.data.image_size)
-        img = tf.image.convert_image_dtype(img, tf.float32)
-        return img
-
-  elif config.data.dataset in ['FFHQ', 'CelebAHQ']:
-    dataset_builder = tf.data.TFRecordDataset(config.data.tfrecords_path)
-    train_split_name = eval_split_name = 'train'
+      return tf.image.resize(img, [config.data.image_size, config.data.image_size], antialias=True)
 
   else:
     raise NotImplementedError(
       f'Dataset {config.data.dataset} not yet supported.')
 
-  # Customize preprocess functions for each dataset.
-  if config.data.dataset in ['FFHQ', 'CelebAHQ']:
-    def preprocess_fn(d):
-      sample = tf.io.parse_single_example(d, features={
-        'shape': tf.io.FixedLenFeature([3], tf.int64),
-        'data': tf.io.FixedLenFeature([], tf.string)})
-      data = tf.io.decode_raw(sample['data'], tf.uint8)
-      data = tf.reshape(data, sample['shape'])
-      data = tf.transpose(data, (1, 2, 0))
-      img = tf.image.convert_image_dtype(data, tf.float32)
-      if config.data.random_flip and not evaluation:
-        img = tf.image.random_flip_left_right(img)
-      if uniform_dequantization:
-        img = (tf.random.uniform(img.shape, dtype=tf.float32) + img * 255.) / 256.
-      return dict(image=img, label=None)
+  
+  def preprocess_fn(d):
+    """Basic preprocessing function scales data to [0, 1) and randomly flips."""
+    img = resize_op(d['image']) if config.data.dataset != 'samples' else resize_op(d['sample'])
+    if config.data.random_flip and not evaluation:
+      img = tf.image.random_flip_left_right(img)
+    if uniform_dequantization:
+      img = (tf.random.uniform(img.shape, dtype=tf.float32) + img * 255.) / 256.
 
-  else:
-    def preprocess_fn(d):
-      """Basic preprocessing function scales data to [0, 1) and randomly flips."""
-      img = resize_op(d['image'])
-      if config.data.random_flip and not evaluation:
-        img = tf.image.random_flip_left_right(img)
-      if uniform_dequantization:
-        img = (tf.random.uniform(img.shape, dtype=tf.float32) + img * 255.) / 256.
-
-      return dict(image=img, label=d.get('label', None))
+    return dict(image=img, label=d.get('label', None))
 
   def create_dataset(dataset_builder, split):
     dataset_options = tf.data.Options()

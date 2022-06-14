@@ -2,7 +2,8 @@
 import abc
 import torch
 import numpy as np
-
+import torch.nn as nn
+import torch.nn.functional as F
 
 class SDE(abc.ABC):
   """SDE abstract class. Functions are designed for a mini-batch of inputs."""
@@ -68,7 +69,7 @@ class SDE(abc.ABC):
     G = diffusion * torch.sqrt(torch.tensor(dt, device=t.device))
     return f, G
 
-  def reverse(self, score_fn, probability_flow=False):
+  def reverse(self, score_fn, classifier_fn=None, probability_flow=False, conditional=False, cond=None, scaling_factor=1):
     """Create the reverse-time SDE/ODE.
 
     Args:
@@ -91,19 +92,54 @@ class SDE(abc.ABC):
         return T
 
       def sde(self, x, t):
-        """Create the drift and diffusion functions for the reverse SDE/ODE."""
-        drift, diffusion = sde_fn(x, t)
-        score = score_fn(x, t)
-        drift = drift - diffusion[:, None, None, None] ** 2 * score * (0.5 if self.probability_flow else 1.)
-        # Set the diffusion function to zero for ODEs.
-        diffusion = 0. if self.probability_flow else diffusion
+        if conditional:
+          """Create the drift and diffusion functions for the conditional reverse SDE/ODE."""
+          drift, diffusion = sde_fn(x, t)
+          score = score_fn(x, t)
+          with torch.enable_grad():
+            x = x.clone().detach().requires_grad_(True)
+            labels = torch.ones(x.shape[0], device=x.device, dtype=torch.long) * cond
+            sm = nn.Softmax(dim=1)
+            log_prob_class = torch.log(sm(classifier_fn(x, t))+ 1e-8)
+            label_mask = F.one_hot(labels, num_classes=log_prob_class.shape[1])
+            grads_prob_class, = torch.autograd.grad(log_prob_class, x, grad_outputs=label_mask)
+
+          # Compute drift and diffusion
+          posterior = score + grads_prob_class*scaling_factor
+          drift = drift - diffusion[:, None, None, None] ** 2 * posterior * (0.5 if self.probability_flow else 1.)
+          diffusion = 0. if self.probability_flow else diffusion
+
+        else:
+          """Create the drift and diffusion functions for the reverse SDE/ODE."""
+          drift, diffusion = sde_fn(x, t)
+          score = score_fn(x, t)
+          drift = drift - diffusion[:, None, None, None] ** 2 * score * (0.5 if self.probability_flow else 1.)
+          diffusion = 0. if self.probability_flow else diffusion
         return drift, diffusion
 
       def discretize(self, x, t):
         """Create discretized iteration rules for the reverse diffusion sampler."""
-        f, G = discretize_fn(x, t)
-        rev_f = f - G[:, None, None, None] ** 2 * score_fn(x, t) * (0.5 if self.probability_flow else 1.)
-        rev_G = torch.zeros_like(G) if self.probability_flow else G
+        if conditional:
+          score = score_fn(x, t)
+          with torch.enable_grad():
+            x = x.clone().detach().requires_grad_(True)
+            labels = torch.ones(x.shape[0], device=x.device, dtype=torch.long) * cond
+            sm = nn.Softmax(dim=1)
+            log_prob_class = torch.log(sm(classifier_fn(x, t))+ 1e-8)
+            label_mask = F.one_hot(labels, num_classes=log_prob_class.shape[1])
+            grads_prob_class, = torch.autograd.grad(log_prob_class, x, grad_outputs=label_mask)
+
+          # Compute drift and diffusion
+          posterior = score + grads_prob_class*scaling_factor
+          f, G = discretize_fn(x, t)
+          rev_f = f - G[:, None, None, None] ** 2 * posterior * (0.5 if self.probability_flow else 1.)
+          rev_G = torch.zeros_like(G) if self.probability_flow else G
+        
+        else:
+          score = score_fn(x, t)
+          f, G = discretize_fn(x, t)
+          rev_f = f - G[:, None, None, None] ** 2 * score * (0.5 if self.probability_flow else 1.)
+          rev_G = torch.zeros_like(G) if self.probability_flow else G
         return rev_f, rev_G
 
     return RSDE()
@@ -183,13 +219,29 @@ class subVPSDE(SDE):
     return 1
 
   def sde(self, x, t):
+    # beta_t                                  := \beta_t
+    # drift                                   := -1/2 * \beta_t * x := f(x,t)
+    # discount                                := 1 - exp(-2 * \int_0^t \beta(s) ds)
+    # beta_0 * t - (beta_1 - beta_0) * t ** 2 := \int_0^t \beta(s) ds
+    # diffusion                               := \sqrt(\beta_t * (1 - ...)) := g(t)
+
+    # Bt      = B0 + t * (B1 - B0)
+    # \int Bt = B0 * t + 1/2 * (B1 - B0) * t^2
     beta_t = self.beta_0 + t * (self.beta_1 - self.beta_0)
     drift = -0.5 * beta_t[:, None, None, None] * x
+    # discount = 1 - exp(-2 * (beta_0 * t + (-1/2) * (beta_1 - beta_0) * t ** 2))
     discount = 1. - torch.exp(-2 * self.beta_0 * t - (self.beta_1 - self.beta_0) * t ** 2)
     diffusion = torch.sqrt(beta_t * discount)
     return drift, diffusion
 
   def marginal_prob(self, x, t):
+    # log_mean_coeff := -1/4 t^2 (b_max - b_min) - 1/2t b_min
+    # beta_1         := b_max
+    # beta_0         := b_min
+    # x              := O (zero-vector) := x(0)
+    # mean           := e^ (...) * x(0)
+    # std            := 1 - e^ (-1/2t^2... - t...)
+    # std            := 1 - e^ 2*(-1/4t^2... - 1/2t...)
     log_mean_coeff = -0.25 * t ** 2 * (self.beta_1 - self.beta_0) - 0.5 * t * self.beta_0
     mean = torch.exp(log_mean_coeff)[:, None, None, None] * x
     std = 1 - torch.exp(2. * log_mean_coeff)

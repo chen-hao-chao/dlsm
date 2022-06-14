@@ -3,7 +3,6 @@ import tensorflow as tf
 import os
 import logging
 
-
 def restore_checkpoint(ckpt_dir, state, device):
   if not tf.io.gfile.exists(ckpt_dir):
     tf.io.gfile.makedirs(os.path.dirname(ckpt_dir))
@@ -16,14 +15,23 @@ def restore_checkpoint(ckpt_dir, state, device):
     state['model'].load_state_dict(loaded_state['model'], strict=False)
     state['ema'].load_state_dict(loaded_state['ema'])
     state['step'] = loaded_state['step']
+    state['scheduler'].load_state_dict(loaded_state['scheduler'])
     return state
 
 
-def save_checkpoint(ckpt_dir, state):
-  saved_state = {
-    'optimizer': state['optimizer'].state_dict(),
-    'model': state['model'].state_dict(),
-    'ema': state['ema'].state_dict(),
-    'step': state['step']
-  }
+def save_checkpoint(ckpt_dir, state, ema=True):
+  if ema:
+    saved_state = {
+      'optimizer': state['optimizer'].state_dict(),
+      'model': state['model'].state_dict(),
+      'step': state['step'],
+      'ema': state['ema'].state_dict(),
+    }
+  else:
+    saved_state = {
+      'optimizer': state['optimizer'].state_dict(),
+      'model': state['model'].state_dict(),
+      'step': state['step'],
+    }
+  
   torch.save(saved_state, ckpt_dir)
