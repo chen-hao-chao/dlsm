@@ -1,12 +1,15 @@
 # Denoising Likelihood Score Matching for Conditional Score-based Data Generation
 
-[![arXiv](https://img.shields.io/badge/arXiv-2203.14206-b31b1b.svg?style=flat-square)](https://arxiv.org/abs/2203.14206)<br>
+[![arXiv](https://img.shields.io/badge/arXiv-2203.14206-b31b1b.svg?style=flat-square)](https://arxiv.org/abs/2203.14206)
+[![YouTube](https://img.shields.io/badge/YouTube-ff0101?logo=youtube&style=flat-square)](https://www.youtube.com/watch?v=uO43ZxEAMRc)
 
 This repository includes the official code implementation for the paper [Denoising Likelihood Score Matching for Conditional Score-based Data Generation](https://openreview.net/forum?id=LcF-EEt8cCC&referrer=%5BAuthor%20Console%5D(%2Fgroup%3Fid%3DICLR.cc%2F2022%2FConference%2FAuthors%23your-submissions)).
 
 <img src="assets/training.png" alt="training" width="750"/>
 
 The code implementation for the motivational example (the toy experiment) is in [chen-hao-chao/dlsm-toy](https://github.com/chen-hao-chao/dlsm-toy).
+
+The project page is available at: <https://chen-hao-chao.github.io/dlsm/>
 
 ## Pretrained Weights
 |Model | Dataset | Checkpoint | 
