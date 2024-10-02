@@ -276,7 +276,7 @@
           can be represented as the combination of the log-gradient of a classifier $p(y|\mathbf{\tilde{x}};\theta)$ and a prior score model $s(\mathbf{\tilde{x}};\phi)$:</p>
         <p class="has-text-centered">$$s(\mathbf{\tilde{x}}|y;\theta,\phi) = \nabla_{\mathbf{\tilde{x}}} \log p(y|\mathbf{\tilde{x}};\theta) + s(\mathbf{\tilde{x}};\phi).$$</p>
         <p>The classifier can be trained with cross-entropy (CE) loss $L_{CE}(\theta)=\mathbb{E}_{p_{\sigma}(\mathbf{\tilde{x}}|\mathbf{x}) p(\mathbf{x},y)}[-\log p(y|\mathbf{\tilde{x}};\theta)]$, and the score model trained with denoising
-          score-matching (DSM) loss $L_{DSM}(\phi)$. Unfortunately, a few previous studies [3,4] have noticed that the approximation of $\nabla_{\mathbf{\tilde{x}}} \log p(y|\mathbf{\tilde{x}};\theta)$ is empirically inaccurate
+          score-matching (DSM) loss $L_{DSM}(\phi)$. Unfortunately, a few previous studies <a href="#Ref3">[3,4]</a> have noticed that the approximation of $\nabla_{\mathbf{\tilde{x}}} \log p(y|\mathbf{\tilde{x}};\theta)$ is empirically inaccurate
           (referred to as the <b>score mismatch issue</b> in this work), and leveraged a scaling factor $\alpha>0$ to adjust the likelihood score $\nabla_{\mathbf{\tilde{x}}} \log p(y|\mathbf{\tilde{x}};\theta)$. Such a scaling factor 
           is a hyperparameter that controls the amount of conditional information incorporated during the sampling process. However, this technique usually causes the diversity of generated data samples to degrade noticeably.</p>
       </div>
