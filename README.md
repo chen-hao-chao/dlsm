@@ -16,12 +16,12 @@ The project page is available at: <https://chen-hao-chao.github.io/dlsm/>
 ## Pretrained Weights
 |Model | Dataset | Checkpoint | 
 | --- | ------- | ---------- |
-| Classifier | Cifar-10 | [Cifar10/ours/checkpoint.pth](https://drive.google.com/file/d/18g8SuzYqN6IbOiNaMaBGMlIPPuLy6s1K/view?usp=sharing) |
-| Classifier | Cifar-10 | [Cifar10/base/checkpoint.pth](https://drive.google.com/file/d/19n58__KAUSoMiXLHw9g57eGKeS9Vdq54/view?usp=sharing) |
-| Classifier | Cifar-100 | [Cifar100/ours/checkpoint.pth](https://drive.google.com/file/d/1BpsE0Xuw_TNFiDKTjSwvR6GavPEI-tRJ/view?usp=sharing) |
-| Classifier | Cifar-100 | [Cifar100/base/checkpoint.pth](https://drive.google.com/file/d/1hWSbpKzuYBb5JL7-_yGeNxyQb0pwhwZL/view?usp=sharing) |
-| Score Model | Cifar-10 | [Cifar10/score/checkpoint.pth](https://drive.google.com/file/d/1f1TIOgyZi-d7X05JcLwJAcoO57cVg8by/view?usp=sharing) |
-| Score Model | Cifar-100 | [Cifar100/score/checkpoint.pth](https://drive.google.com/file/d/16PL7dtu8gbjQcua068HLqwqsnv9pHifY/view?usp=sharing) |
+| Classifier | Cifar-10 | [Cifar10/ours/checkpoint.pth](https://drive.google.com/file/d/1BLewrKYoHZNinQHxA16NW4CyUScaYf1g/view?usp=drive_link) |
+| Classifier | Cifar-10 | [Cifar10/base/checkpoint.pth](https://drive.google.com/file/d/1-5vHN-JLL4PviaWKHyL__FmadbgNjhLu/view?usp=drive_link) |
+| Classifier | Cifar-100 | [Cifar100/ours/checkpoint.pth](https://drive.google.com/file/d/1gxpggh1QPVIrvtMVhFu03xUvbRHfFeCf/view?usp=drive_link) |
+| Classifier | Cifar-100 | [Cifar100/base/checkpoint.pth](https://drive.google.com/file/d/1fpywbC_yx8MbDYxKRWBeXRcJM1ER4ZaI/view?usp=drive_link) |
+| Score Model | Cifar-10 | [Cifar10/score/checkpoint.pth](https://drive.google.com/file/d/16LBqL_44yLurwTLZAZAm9OdN2UpbHCPM/view?usp=drive_link) |
+| Score Model | Cifar-100 | [Cifar100/score/checkpoint.pth](https://drive.google.com/file/d/1k2LKzvs0LA61q3BjHNSESBitOOacf5Fs/view?usp=drive_link) |
 
 ## Dependencies
 Install the necessary python packages through the following command.
